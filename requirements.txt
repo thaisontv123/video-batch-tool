@@ -1,0 +1,7 @@
+# Công cụ Render Video Hàng Loạt — KHÔNG cần cài gói Python ngoài.
+# Toàn bộ dùng thư viện chuẩn của Python (tkinter có sẵn khi cài Python trên Windows).
+#
+# Phụ thuộc DUY NHẤT nằm ngoài Python: ffmpeg (phải cài và thêm vào PATH).
+#   Tải: https://www.gyan.dev/ffmpeg/builds/  (xem hướng dẫn trong README.md)
+#
+# Vì vậy file này để trống (không có gói pip nào cần cài).

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Logs & output render thử
+*.log
+render_log.txt
+output.mp4
+
+# File tạm / test
+_test/
+_g/
+_s/
+scratchpad/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
