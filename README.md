@@ -64,6 +64,16 @@ thư-mục-gốc/
 | `app.py` | Giao diện Tkinter + điều phối render song song có tiến trình. |
 | `run.bat` | Khởi động nhanh bằng `pythonw`. |
 
+## Hiệu ứng sóng âm thanh (overlay)
+
+- Ô **"🎵 Sóng âm thanh (overlay)"** trong panel Hiệu ứng: chồng một **video trực quan
+  sóng âm** (dạng dải sáng/spectrum trên **nền đen**) lên video — giống hệt cơ chế tuyết.
+- Bấm **"Chọn..."** trỏ tới file video sóng âm của bạn; **slider "Độ đậm sóng"** chỉnh độ mờ.
+- Dùng blend `screen` trong RGB nên **nền đen của file tự biến mất**, chỉ còn dải sóng phát
+  sáng hiện lên. File cần là **sóng sáng trên nền đen** (đa số template music-visualizer đều vậy).
+- Lưu ý: đây là overlay trang trí lặp lại theo video, **không phản ứng theo đúng âm thanh**
+  của từng project (giống tuyết). Có thể bật cùng lúc với tuyết.
+
 ## Hiệu ứng lắc nhẹ sang 2 bên (mượt)
 
 - Thay cho "Rung máy quay" (xoay tròn máy móc) + "Motion zoom" (zoompan hay giật) trước đây.

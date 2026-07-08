@@ -45,6 +45,7 @@ class App(tk.Tk):
         # --- state ---
         self.root_dir = tk.StringVar()
         self.snow_path = tk.StringVar()
+        self.wave_path = tk.StringVar()
         self.projects = []                 # danh sách đường dẫn thư mục con
         self.row_by_folder = {}            # folder -> item id trong Treeview
         self.row_data = {}                 # folder -> dict(name,status,progress,note)
@@ -61,6 +62,8 @@ class App(tk.Tk):
         # --- effect vars ---
         self.snow_on = tk.BooleanVar(value=True)
         self.snow_opacity = tk.DoubleVar(value=0.6)
+        self.wave_on = tk.BooleanVar(value=False)
+        self.wave_opacity = tk.DoubleVar(value=0.9)
         self.smooth_shake_on = tk.BooleanVar(value=True)
         self.smooth_shake_strength = tk.IntVar(value=20)
         # Độ mượt lắc (supersampling): nhãn -> hệ số F
@@ -190,6 +193,19 @@ class App(tk.Tk):
         ttk.Combobox(rq, textvariable=self.smooth_quality,
                      values=list(self.quality_choices.keys()), state="readonly",
                      width=20).pack(side="left")
+
+        ttk.Separator(f).pack(fill="x", pady=6)
+
+        # Sóng âm thanh (overlay video sáng trên nền đen — giống tuyết)
+        ttk.Checkbutton(f, text="🎵  Sóng âm thanh (overlay)",
+                        variable=self.wave_on).pack(anchor="w", pady=2)
+        self._slider(f, "Độ đậm sóng (opacity)", self.wave_opacity,
+                     0.0, 1.0, resolution=0.05)
+        wr = ttk.Frame(f); wr.pack(fill="x", pady=(0, 4))
+        ttk.Label(wr, text="File sóng âm:").pack(side="left")
+        ttk.Entry(wr, textvariable=self.wave_path, state="readonly").pack(
+            side="left", fill="x", expand=True, padx=6)
+        ttk.Button(wr, text="Chọn...", command=self._pick_wave).pack(side="left")
 
         ttk.Separator(f).pack(fill="x", pady=6)
 
@@ -462,6 +478,13 @@ class App(tk.Tk):
         if f:
             self.snow_path.set(f)
 
+    def _pick_wave(self):
+        f = filedialog.askopenfilename(
+            title="Chọn video sóng âm (nền đen)",
+            filetypes=[("Video", "*.mp4 *.mov *.mkv"), ("Tất cả", "*.*")])
+        if f:
+            self.wave_path.set(f)
+
     def _pick_color(self, var, swatch):
         rgb, hexc = colorchooser.askcolor(color=var.get(), title="Chọn màu")
         if hexc:
@@ -480,10 +503,12 @@ class App(tk.Tk):
 
         need_snow = self.snow_on.get()
         snow = self.snow_path.get()
+        need_wave = self.wave_on.get()
+        wave = self.wave_path.get()
         ready = 0
         for folder in self.projects:
             name = os.path.basename(folder)
-            missing = core.project_status(folder, need_snow, snow)
+            missing = core.project_status(folder, need_snow, snow, need_wave, wave)
             if missing:
                 status, note = ST_SKIP, f"Thiếu {', '.join(missing)}"
             else:
@@ -512,6 +537,8 @@ class App(tk.Tk):
         cfg["encoder"] = self.encoder_choices.get(self.encoder_label.get(), "libx264")
         cfg["snow_video_path"] = self.snow_path.get()
         cfg["snow_opacity"] = round(float(self.snow_opacity.get()), 3)
+        cfg["wave_video_path"] = self.wave_path.get()
+        cfg["wave_opacity"] = round(float(self.wave_opacity.get()), 3)
         cfg["smooth_shake_strength"] = int(self.smooth_shake_strength.get())
         cfg["shake_supersample"] = self.quality_choices.get(self.smooth_quality.get(), 2)
         cfg["max_workers"] = self._effective_workers()  # 1 nếu chạy lần lượt
@@ -519,6 +546,7 @@ class App(tk.Tk):
         cfg["effects"] = {
             "snow_overlay": bool(self.snow_on.get()),
             "smooth_shake": bool(self.smooth_shake_on.get()),
+            "sound_wave": bool(self.wave_on.get()),
             "glow_subtitle": bool(self.glow_on.get()),
         }
         cfg["subtitle"] = {
@@ -546,6 +574,12 @@ class App(tk.Tk):
                 APP_TITLE,
                 "Đang bật hiệu ứng Tuyết nhưng chưa chọn file snow.mp4 hợp lệ.")
             return False
+        if self.wave_on.get() and not (self.wave_path.get() and
+                                       os.path.exists(self.wave_path.get())):
+            messagebox.showwarning(
+                APP_TITLE,
+                "Đang bật hiệu ứng Sóng âm nhưng chưa chọn file video sóng âm hợp lệ.")
+            return False
         ok, _ = core.check_ffmpeg()
         if not ok:
             messagebox.showerror(APP_TITLE, "Không tìm thấy ffmpeg. Vui lòng cài đặt trước.")
@@ -562,7 +596,9 @@ class App(tk.Tk):
         target = None
         for folder in self.projects:
             if not core.project_status(folder, cfg["effects"]["snow_overlay"],
-                                       cfg["snow_video_path"]):
+                                       cfg["snow_video_path"],
+                                       cfg["effects"]["sound_wave"],
+                                       cfg["wave_video_path"]):
                 target = folder
                 break
         if not target:

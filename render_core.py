@@ -60,10 +60,13 @@ def default_config():
         "effects": {
             "snow_overlay": True,
             "smooth_shake": True,     # rung máy nhẹ, mượt (thay cho shake + zoom cũ)
+            "sound_wave": False,      # overlay sóng âm (video sáng trên nền đen)
             "glow_subtitle": False,
         },
         "snow_video_path": "",   # đường dẫn tuyệt đối tới snow.mp4 (chọn qua UI)
         "snow_opacity": 0.6,
+        "wave_video_path": "",   # đường dẫn tuyệt đối tới video sóng âm (chọn qua UI)
+        "wave_opacity": 0.9,
         "smooth_shake_strength": 20,   # biên độ lắc ngang (px), càng lớn càng trôi rộng
         "shake_supersample": 2,        # độ mượt lắc: 2=Thường(nhanh), 3=Cao(mượt hơn)
         "subtitle": {
@@ -237,7 +240,25 @@ def find_projects(root):
     ]
 
 
-def project_status(folder, need_snow, snow_path):
+def overlay_indices(cfg):
+    """Chỉ số input ffmpeg của các lớp overlay, theo đúng thứ tự prepare_command thêm.
+
+    Input cố định: 0 = ảnh, 1 = audio. Sau đó lần lượt: snow (nếu bật), sóng âm (nếu bật).
+    Trả về (snow_idx, wave_idx); None nếu lớp đó tắt.
+    """
+    idx = 2
+    snow_idx = wave_idx = None
+    eff = cfg.get("effects", {})
+    if eff.get("snow_overlay"):
+        snow_idx = idx
+        idx += 1
+    if eff.get("sound_wave"):
+        wave_idx = idx
+        idx += 1
+    return snow_idx, wave_idx
+
+
+def project_status(folder, need_snow, snow_path, need_wave=False, wave_path=None):
     """Trả về danh sách file còn thiếu của 1 project (rỗng = đủ điều kiện render)."""
     img = find_file(folder, IMG_EXT)
     audio = find_file(folder, AUDIO_EXT)
@@ -246,6 +267,8 @@ def project_status(folder, need_snow, snow_path):
                [("ảnh", img), ("audio", audio), ("phụ đề .srt", sub)] if f is None]
     if need_snow and not (snow_path and os.path.exists(snow_path)):
         missing.append("snow.mp4")
+    if need_wave and not (wave_path and os.path.exists(wave_path)):
+        missing.append("file sóng âm")
     return missing
 
 
@@ -284,19 +307,27 @@ def build_filter_complex(cfg, sub_path):
     filter_parts = [bg_chain]
     last_label = "[bg]"
 
-    if effects["snow_overlay"]:
-        # QUAN TRỌNG: blend 'screen' PHẢI chạy trong RGB (gbrp).
-        # Nếu để mặc định (YUV), phép screen tác động lên 2 kênh chroma Cb/Cr
-        # (trung tính ở 128) đẩy cả hai lên ~192 -> ám HỒNG/tím toàn khung hình.
-        # Convert cả nền và tuyết sang gbrp trước khi blend thì nền đen mới thực sự
-        # "biến mất" và màu gốc được giữ nguyên (đã test: fix hết ám hồng).
-        filter_parts.append(f"[2:v]scale={res},format=gbrp[snow]")
+    # Các lớp overlay dạng "sáng trên nền đen" (tuyết, sóng âm) đều chồng bằng blend
+    # 'screen'. QUAN TRỌNG: phải chạy trong RGB (gbrp) — nếu để YUV, phép screen tác
+    # động lên 2 kênh chroma Cb/Cr (trung tính 128) đẩy lên ~192 -> ám HỒNG/tím toàn
+    # khung. Convert nền + overlay sang gbrp thì nền đen mới thực sự "biến mất".
+    snow_idx, wave_idx = overlay_indices(cfg)
+    overlays = []
+    if snow_idx is not None:
+        overlays.append((snow_idx, cfg.get("snow_opacity", 0.6)))
+    if wave_idx is not None:
+        overlays.append((wave_idx, cfg.get("wave_opacity", 0.9)))
+
+    if overlays:
         filter_parts.append(f"{last_label}format=gbrp[bgrgb]")
-        filter_parts.append(
-            f"[bgrgb][snow]blend=all_mode=screen:"
-            f"all_opacity={cfg['snow_opacity']}[blended]"
-        )
-        last_label = "[blended]"
+        last_label = "[bgrgb]"
+        for i, (idx, opacity) in enumerate(overlays):
+            filter_parts.append(f"[{idx}:v]scale={res},format=gbrp[ov{i}s]")
+            out = f"[ov{i}]"
+            filter_parts.append(
+                f"{last_label}[ov{i}s]blend=all_mode=screen:"
+                f"all_opacity={opacity}{out}")
+            last_label = out
 
     sub = cfg["subtitle"]
     style = (
@@ -327,12 +358,15 @@ def prepare_command(folder, cfg):
     audio = find_file(folder, AUDIO_EXT)
     sub = find_file(folder, SUB_EXT)
     snow = cfg.get("snow_video_path") or ""
+    wave = cfg.get("wave_video_path") or ""
     out = os.path.join(folder, cfg["output_name"])
 
     missing = [name for name, f in
                [("ảnh", img), ("audio", audio), ("phụ đề .srt", sub)] if f is None]
     if cfg["effects"]["snow_overlay"] and not (snow and os.path.exists(snow)):
         missing.append("snow.mp4")
+    if cfg["effects"].get("sound_wave") and not (wave and os.path.exists(wave)):
+        missing.append("file sóng âm")
     if missing:
         return {"ok": False, "cmd": None, "output": out,
                 "missing": f"Thiếu {', '.join(missing)}", "duration": None,
@@ -363,8 +397,11 @@ def prepare_command(folder, cfg):
         cmd += ["-filter_complex_threads", str(int(ft)),
                 "-filter_threads", str(int(ft))]
     cmd += ["-loop", "1", "-i", img, "-i", audio]
+    # THỨ TỰ input phải khớp overlay_indices(): snow trước, sóng âm sau.
     if cfg["effects"]["snow_overlay"]:
         cmd += ["-stream_loop", "-1", "-i", snow]
+    if cfg["effects"].get("sound_wave"):
+        cmd += ["-stream_loop", "-1", "-i", wave]
 
     cmd += [
         "-filter_complex", filter_complex,
