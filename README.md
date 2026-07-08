@@ -119,8 +119,12 @@ thư-mục-gốc/
 - **Luồng CPU/video**: giới hạn số luồng filter cho mỗi video (`-filter_complex_threads`).
 - Dòng chữ **"ước tính chiếm CPU: ~X%"** cập nhật ngay khi bạn chỉnh 2 ô trên
   (Tổng luồng ≈ số video song song × luồng/video, so với số nhân CPU).
-- Mặc định đặt ở mức **~50% (vừa)**. Muốn máy nhẹ hơn để làm việc khác → **giảm cả hai ô**;
-  muốn render nhanh nhất → tăng lên (chấp nhận CPU cao).
+- **Mặc định TỰ ĐỘNG theo cấu hình máy** để render nhanh nhất (dùng gần hết CPU, ~100%):
+  số video song song = tối đa 6, luồng/video chia phần còn lại. Máy càng mạnh chạy càng mạnh.
+- Muốn **máy nhẹ để làm việc khác** → giảm 2 ô (VD Song song 2 × Luồng 2 ≈ 33%).
+- **GPU thấp là bình thường:** khâu nén NVENC rất nhẹ; nút thắt là hiệu ứng chạy CPU nên
+  GPU luôn "rảnh". Cứ nhìn **thời gian render**, không nhìn % GPU. Muốn GPU bận hơn +
+  nhanh nhất tổng thể thì **render nhiều video song song** (nhiều phiên NVENC cùng lúc).
 
 ## Thanh tiến độ từng video
 

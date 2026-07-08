@@ -84,10 +84,14 @@ class App(tk.Tk):
         _cpu = os.cpu_count() or 4
         # Chế độ chạy: "sequential" (lần lượt) | "parallel" (song song)
         self.run_mode = tk.StringVar(value="parallel")
-        # Mặc định nhẹ nhàng (~50% CPU) để không chiếm hết máy — hiệu ứng luôn chạy CPU.
-        # Tổng luồng ≈ video_song_song × luồng/video ≈ nửa số nhân.
-        self.max_workers = tk.IntVar(value=max(2, _cpu // 4))
-        self.filter_threads = tk.IntVar(value=2)
+        # Mặc định TỰ ĐỘNG theo cấu hình máy để render nhanh nhất (máy mạnh chạy mạnh):
+        #   - Số video song song: tối đa 6 (an toàn cho số phiên NVENC của GPU).
+        #   - Luồng CPU/video: chia phần luồng còn lại, tối đa 6 (>8 luồng/video vô ích).
+        #   -> tổng ≈ số luồng CPU, dùng gần hết máy. Muốn nhẹ hơn thì tự giảm 2 ô.
+        _par = min(6, max(2, _cpu // 4)) if _cpu >= 4 else 1
+        _ft = max(2, min(6, _cpu // _par))
+        self.max_workers = tk.IntVar(value=_par)
+        self.filter_threads = tk.IntVar(value=_ft)
 
         # --- encoder (CPU/GPU) ---
         self.encoder_label = tk.StringVar(value=core.CPU_ENCODER["label"])
@@ -296,7 +300,7 @@ class App(tk.Tk):
         ttk.Radiobutton(rm, text="Song song", value="parallel",
                         variable=self.run_mode,
                         command=self._on_mode_change).pack(side="left", padx=(10, 4))
-        self.sp_parallel = ttk.Spinbox(rm, from_=2, to=cpu,
+        self.sp_parallel = ttk.Spinbox(rm, from_=1, to=cpu,
                                        textvariable=self.max_workers, width=5,
                                        command=self._update_cpu_hint)
         self.sp_parallel.pack(side="left")
