@@ -15,6 +15,7 @@ import os
 import re
 import glob
 import shutil
+import tempfile
 import threading
 import subprocess
 
@@ -334,9 +335,23 @@ def prepare_command(folder, cfg):
         missing.append("snow.mp4")
     if missing:
         return {"ok": False, "cmd": None, "output": out,
-                "missing": f"Thiếu {', '.join(missing)}", "duration": None}
+                "missing": f"Thiếu {', '.join(missing)}", "duration": None,
+                "temp_sub": None}
 
-    sub_escaped = escape_ffmpeg_path(sub)
+    # Copy .srt sang FILE TẠM có đường dẫn ASCII an toàn rồi mới đưa vào filter
+    # 'subtitles='. Lý do: filter này bao đường dẫn bằng dấu nháy đơn ', nên nếu đường
+    # dẫn gốc chứa dấu ' (vd tên "'I'll Be...'") sẽ vỡ lệnh ("No option name...").
+    # Dùng file tạm né hoàn toàn mọi ký tự đặc biệt/nháy/tiếng Việt trong path.
+    temp_sub = None
+    try:
+        fd, temp_sub = tempfile.mkstemp(suffix=".srt", prefix="vbt_")
+        os.close(fd)
+        shutil.copyfile(sub, temp_sub)
+        sub_for_filter = temp_sub
+    except Exception:  # noqa: BLE001
+        sub_for_filter = sub  # dự phòng: dùng path gốc nếu copy lỗi
+
+    sub_escaped = escape_ffmpeg_path(sub_for_filter)
     filter_complex = build_filter_complex(cfg, sub_escaped)
 
     # -progress pipe:1 -nostats: xuất tiến độ máy-đọc-được ra stdout để vẽ thanh %
@@ -361,7 +376,7 @@ def prepare_command(folder, cfg):
     cmd += ["-c:a", "aac", "-b:a", "192k", out]
 
     return {"ok": True, "cmd": cmd, "output": out, "missing": None,
-            "duration": probe_duration(audio)}
+            "duration": probe_duration(audio), "temp_sub": temp_sub}
 
 
 def run_command(cmd, on_proc=None, on_progress=None, duration=None):

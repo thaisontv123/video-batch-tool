@@ -627,6 +627,12 @@ class App(tk.Tk):
             finally:
                 with self.procs_lock:
                     self.active_procs.pop(folder, None)
+                ts = prep.get("temp_sub")
+                if ts and os.path.exists(ts):
+                    try:
+                        os.remove(ts)
+                    except OSError:
+                        pass
 
             if self.cancel_event.is_set():
                 self._emit(folder, ST_CANCEL, "Đã hủy")
