@@ -66,8 +66,9 @@ thư-mục-gốc/
 
 ## Nền video phong cảnh (ảnh chính đè giữa)
 
-- Section **"🎞️ Nền video phong cảnh"**: dùng các **video phong cảnh làm nền MỜ** phủ kín
-  khung, **ảnh chính đè ở giữa** (~62%, chỉnh bằng slider "Cỡ ảnh chính"), phụ đề bên dưới.
+- Section **"🎞️ Nền video phong cảnh"**: dùng các **video phong cảnh làm nền** (giữ SẮC NÉT,
+  không làm mờ) phủ kín khung, **ảnh chính đè ở giữa** (~62%, chỉnh bằng slider "Cỡ ảnh chính"),
+  phụ đề bên dưới. (Muốn làm mờ nền thì đặt `scenery_blur` > 0 trong cấu hình — mặc định 0.)
 - Bấm **"Chọn..."** trỏ tới **1 thư mục chứa các video phong cảnh** (mp4/mov/mkv...). Dùng
   chung cho mọi project.
 - **Tự xáo trộn + lặp:** dù video phong cảnh chỉ vài giây tới ~30s, tool tự **xáo trộn ngẫu

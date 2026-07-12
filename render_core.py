@@ -68,7 +68,7 @@ def default_config():
         },
         "scenery_dir": "",       # thư mục chứa các video phong cảnh (chọn qua UI)
         "scenery_image_scale": 0.62,   # cỡ ảnh chính so với chiều ngang khung
-        "scenery_blur": 18,      # độ mờ phông nền phong cảnh
+        "scenery_blur": 0,       # độ mờ nền (0 = giữ nền sắc nét, không làm mờ)
         "snow_video_path": "",   # đường dẫn tuyệt đối tới snow.mp4 (chọn qua UI)
         "snow_opacity": 0.6,
         "wave_video_path": "",   # đường dẫn tuyệt đối tới video sóng âm (chọn qua UI)
@@ -401,12 +401,15 @@ def build_filter_complex(cfg, sub_path):
     filter_parts = []
 
     if idx["scenery_on"]:
-        # CHẾ ĐỘ NỀN PHONG CẢNH: video phong cảnh làm nền MỜ phủ kín, ảnh chính đè giữa.
+        # CHẾ ĐỘ NỀN PHONG CẢNH: video phong cảnh phủ kín làm nền, ảnh chính đè giữa.
         # (Ảnh chính đứng yên — không áp hiệu ứng lắc ở chế độ này.)
-        blur = cfg.get("scenery_blur", 18)
-        filter_parts.append(
-            f"[{idx['scenery']}:v]scale={res}:force_original_aspect_ratio=increase,"
-            f"crop={res},gblur=sigma={blur}[bg0]")
+        # Chỉ làm mờ nếu scenery_blur > 0 (mặc định 0 = giữ nền SẮC NÉT như video gốc).
+        blur = float(cfg.get("scenery_blur", 0) or 0)
+        bg_steps = (f"[{idx['scenery']}:v]scale={res}:"
+                    f"force_original_aspect_ratio=increase,crop={res}")
+        if blur > 0:
+            bg_steps += f",gblur=sigma={blur}"
+        filter_parts.append(f"{bg_steps}[bg0]")
         img_scale = float(cfg.get("scenery_image_scale", 0.62))
         iw = max(2, (int(int(w) * img_scale)) // 2 * 2)  # chẵn cho yuv420
         filter_parts.append(f"[{idx['image']}:v]scale={iw}:-2[fg]")
