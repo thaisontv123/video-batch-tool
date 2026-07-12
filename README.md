@@ -64,6 +64,19 @@ thư-mục-gốc/
 | `app.py` | Giao diện Tkinter + điều phối render song song có tiến trình. |
 | `run.bat` | Khởi động nhanh bằng `pythonw`. |
 
+## Nền video phong cảnh (ảnh chính đè giữa)
+
+- Section **"🎞️ Nền video phong cảnh"**: dùng các **video phong cảnh làm nền MỜ** phủ kín
+  khung, **ảnh chính đè ở giữa** (~62%, chỉnh bằng slider "Cỡ ảnh chính"), phụ đề bên dưới.
+- Bấm **"Chọn..."** trỏ tới **1 thư mục chứa các video phong cảnh** (mp4/mov/mkv...). Dùng
+  chung cho mọi project.
+- **Tự xáo trộn + lặp:** dù video phong cảnh chỉ vài giây tới ~30s, tool tự **xáo trộn ngẫu
+  nhiên và ghép** cho **vừa đúng độ dài voice** (kể cả voice 1 tiếng). Mỗi project một thứ tự
+  ngẫu nhiên khác nhau.
+- Video phong cảnh khác độ phân giải/fps đều được **chuẩn hóa 1 lần và cache lại** (thư mục
+  `%TEMP%/vbt_scenery_cache`) — các project sau dùng lại ngay, không encode lại.
+- Ở chế độ này ảnh chính **đứng yên** (không áp hiệu ứng lắc). Tuyết/sóng âm vẫn chồng được lên trên.
+
 ## Hiệu ứng sóng âm thanh (overlay)
 
 - Ô **"🎵 Sóng âm thanh (overlay)"** trong panel Hiệu ứng: chồng một **video trực quan

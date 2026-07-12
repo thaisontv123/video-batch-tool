@@ -15,6 +15,8 @@ import os
 import re
 import glob
 import shutil
+import random
+import hashlib
 import tempfile
 import threading
 import subprocess
@@ -61,8 +63,12 @@ def default_config():
             "snow_overlay": True,
             "smooth_shake": True,     # rung máy nhẹ, mượt (thay cho shake + zoom cũ)
             "sound_wave": False,      # overlay sóng âm (video sáng trên nền đen)
+            "scenery_bg": False,      # nền video phong cảnh (mờ) + ảnh chính đè giữa
             "glow_subtitle": False,
         },
+        "scenery_dir": "",       # thư mục chứa các video phong cảnh (chọn qua UI)
+        "scenery_image_scale": 0.62,   # cỡ ảnh chính so với chiều ngang khung
+        "scenery_blur": 18,      # độ mờ phông nền phong cảnh
         "snow_video_path": "",   # đường dẫn tuyệt đối tới snow.mp4 (chọn qua UI)
         "snow_opacity": 0.6,
         "wave_video_path": "",   # đường dẫn tuyệt đối tới video sóng âm (chọn qua UI)
@@ -240,22 +246,134 @@ def find_projects(root):
     ]
 
 
-def overlay_indices(cfg):
-    """Chỉ số input ffmpeg của các lớp overlay, theo đúng thứ tự prepare_command thêm.
+SCENERY_EXT = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
 
-    Input cố định: 0 = ảnh, 1 = audio. Sau đó lần lượt: snow (nếu bật), sóng âm (nếu bật).
-    Trả về (snow_idx, wave_idx); None nếu lớp đó tắt.
+
+def list_scenery(folder):
+    """Danh sách video phong cảnh trong thư mục (sắp xếp theo tên)."""
+    if not folder or not os.path.isdir(folder):
+        return []
+    out = []
+    for f in sorted(os.listdir(folder)):
+        if f.lower().endswith(SCENERY_EXT):
+            out.append(os.path.join(folder, f))
+    return out
+
+
+def _scenery_cache_dir():
+    d = os.path.join(tempfile.gettempdir(), "vbt_scenery_cache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# Cache độ dài clip đã chuẩn hóa (trong 1 phiên chạy) -> tránh gọi ffprobe lặp lại
+# cho mỗi project khi render hàng loạt.
+_scenery_dur_cache = {}
+
+
+def normalize_scenery(files, res, fps, encoder):
+    """Chuẩn hóa các video phong cảnh về cùng độ phân giải/fps/codec (để concat mượt).
+
+    Kết quả được CACHE theo (đường dẫn + mtime + size + res + fps) nên chỉ encode 1 lần,
+    các project sau dùng lại ngay -> không encode lại 10 clip mỗi lần render.
+    Trả về list [(path_chuẩn_hóa, duration_giây)].
     """
-    idx = 2
-    snow_idx = wave_idx = None
+    cache = _scenery_cache_dir()
+    out = []
+    for src in files:
+        try:
+            st = os.stat(src)
+        except OSError:
+            continue
+        key = hashlib.md5(
+            f"{os.path.abspath(src)}|{st.st_mtime_ns}|{st.st_size}|{res}|{fps}"
+            .encode("utf-8")).hexdigest()
+        dst = os.path.join(cache, key + ".mp4")
+        if not os.path.exists(dst):
+            vf = (f"scale={res}:force_original_aspect_ratio=increase,"
+                  f"crop={res},fps={fps},setsar=1,format=yuv420p")
+            # ghi ra file tạm riêng rồi đổi tên (nguyên tử) -> an toàn khi nhiều
+            # project render song song cùng chuẩn hóa 1 clip.
+            tmp = f"{dst}.{os.getpid()}.{threading.get_ident()}.tmp.mp4"
+            cmd = ["ffmpeg", "-y", "-i", src, "-vf", vf, "-an"]
+            cmd += video_encode_args(encoder, {"crf": 23, "preset": "medium"})
+            cmd += [tmp]
+            r = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW)
+            if r.returncode == 0 and os.path.exists(tmp):
+                try:
+                    os.replace(tmp, dst)
+                except OSError:
+                    pass
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            if not os.path.exists(dst):
+                continue
+        d = _scenery_dur_cache.get(dst)
+        if d is None:
+            d = probe_duration(dst)
+            if d:
+                _scenery_dur_cache[dst] = d
+        if d:
+            out.append((dst, d))
+    return out
+
+
+def build_scenery_playlist(normalized, duration, seed=None):
+    """Xáo trộn + lặp các clip đã chuẩn hóa cho tổng độ dài >= duration.
+
+    Trả về đường dẫn file list.txt (dùng cho concat demuxer), hoặc None nếu rỗng.
+    """
+    if not normalized or not duration or duration <= 0:
+        return None
+    rnd = random.Random(seed)
+    seq = []
+    total = 0.0
+    pool = []
+    # trần an toàn để không lặp vô hạn nếu duration quá lớn / clip quá ngắn
+    max_items = 20000
+    while total < duration and len(seq) < max_items:
+        if not pool:
+            pool = normalized[:]
+            rnd.shuffle(pool)
+        path, dur = pool.pop()
+        seq.append(path)
+        total += dur
+    fd, lst = tempfile.mkstemp(suffix=".txt", prefix="vbt_scenery_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        for p in seq:
+            safe = p.replace("\\", "/").replace("'", "'\\''")
+            f.write(f"file '{safe}'\n")
+    return lst
+
+
+def input_layout(cfg):
+    """Chỉ số input ffmpeg của TẤT CẢ nguồn, theo đúng thứ tự prepare_command thêm.
+
+    - Chế độ thường:      [0]=ảnh, [1]=audio, [2]=snow?, [next]=sóng âm?
+    - Chế độ nền phong cảnh: [0]=scenery(concat), [1]=ảnh, [2]=audio, [3]=snow?, ...
+    Trả về dict: scenery/image/audio/snow/wave (None nếu tắt) + scenery_on (bool).
+    """
     eff = cfg.get("effects", {})
+    scenery_on = bool(eff.get("scenery_bg"))
+    idx = {"scenery": None, "snow": None, "wave": None, "scenery_on": scenery_on}
+    i = 0
+    if scenery_on:
+        idx["scenery"] = i
+        i += 1
+    idx["image"] = i
+    i += 1
+    idx["audio"] = i
+    i += 1
     if eff.get("snow_overlay"):
-        snow_idx = idx
-        idx += 1
+        idx["snow"] = i
+        i += 1
     if eff.get("sound_wave"):
-        wave_idx = idx
-        idx += 1
-    return snow_idx, wave_idx
+        idx["wave"] = i
+        i += 1
+    return idx
 
 
 def project_status(folder, need_snow, snow_path, need_wave=False, wave_path=None):
@@ -279,50 +397,59 @@ def build_filter_complex(cfg, sub_path):
     res = cfg["resolution"]
     w, h = res.split(":")
     effects = cfg["effects"]
+    idx = input_layout(cfg)
+    filter_parts = []
 
-    steps = [f"[0:v]scale={res}:force_original_aspect_ratio=increase,crop={res}"]
-
-    if effects.get("smooth_shake"):
-        # LẮC mượt theo quỹ đạo PARABOL (vòng cung), không phải trượt thẳng ngang:
-        #   - Ngang (x): 1 sóng sin CHẬM chu kỳ 8s -> trôi trái<->phải như con lắc.
-        #   - Dọc (y): dao động ở tần số GẤP ĐÔI (chu kỳ 4s) khớp với x -> vì y ~ x²,
-        #     khi ảnh đi trái->giữa->phải nó vẽ 1 CUNG CONG (nhấc lên ở giữa) như parabol.
-        # velocity=0 ở 2 đầu nên đổi chiều rất êm; không sóng tần số cao -> không rung/giật.
-        # Biên độ ngang 0.9*s, dọc 0.35*s (đều < s) -> cửa sổ crop luôn trong khung.
-        s = int(cfg.get("smooth_shake_strength", 20))
-        xexpr = f"{s}+{s}*0.90*sin(2*PI*t/8.0)"
-        yexpr = f"{s}-{s}*0.35*cos(2*PI*t/4.0)"
-        # SUPERSAMPLING chống GIẬT: crop chỉ dịch được nguyên pixel, nên lắc chậm sẽ
-        # nhảy 0,1,0,1 px (giật). Phóng nền lên Fx (bilinear) rồi crop-pan trong không
-        # gian Fx, sau đó thu nhỏ về res (bicubic) -> vị trí lẻ pixel được nội suy mượt.
-        # F càng lớn càng mượt nhưng càng chậm (F=2 ~2.5x, F=3 ~6x thời gian lọc).
-        # Người dùng chọn qua UI "Độ mượt": Thường=2, Cao=3.
-        F = max(1, int(cfg.get("shake_supersample", 2)))
-        steps.append(f"scale=iw*{F}:ih*{F}:flags=bilinear")
-        steps.append(
-            f"crop=in_w-{s*2*F}:in_h-{s*2*F}:x='({xexpr})*{F}':y='({yexpr})*{F}'")
-        steps.append(f"scale={res}:flags=bicubic")  # thu nhỏ + scale về đúng resolution
-
-    bg_chain = ",".join(steps) + "[bg]"
-    filter_parts = [bg_chain]
-    last_label = "[bg]"
+    if idx["scenery_on"]:
+        # CHẾ ĐỘ NỀN PHONG CẢNH: video phong cảnh làm nền MỜ phủ kín, ảnh chính đè giữa.
+        # (Ảnh chính đứng yên — không áp hiệu ứng lắc ở chế độ này.)
+        blur = cfg.get("scenery_blur", 18)
+        filter_parts.append(
+            f"[{idx['scenery']}:v]scale={res}:force_original_aspect_ratio=increase,"
+            f"crop={res},gblur=sigma={blur}[bg0]")
+        img_scale = float(cfg.get("scenery_image_scale", 0.62))
+        iw = max(2, (int(int(w) * img_scale)) // 2 * 2)  # chẵn cho yuv420
+        filter_parts.append(f"[{idx['image']}:v]scale={iw}:-2[fg]")
+        # đặt ảnh hơi cao hơn giữa để chừa chỗ cho phụ đề bên dưới
+        filter_parts.append("[bg0][fg]overlay=(W-w)/2:(H-h)/2-60[bg]")
+        last_label = "[bg]"
+    else:
+        steps = [f"[{idx['image']}:v]scale={res}:"
+                 f"force_original_aspect_ratio=increase,crop={res}"]
+        if effects.get("smooth_shake"):
+            # LẮC mượt theo quỹ đạo PARABOL (vòng cung), không trượt thẳng ngang:
+            #   - Ngang (x): 1 sóng sin CHẬM chu kỳ 8s -> trôi trái<->phải như con lắc.
+            #   - Dọc (y): dao động tần số GẤP ĐÔI (chu kỳ 4s) -> y ~ x² -> vẽ CUNG CONG.
+            # velocity=0 ở 2 đầu nên đổi chiều êm; không sóng tần số cao -> không giật.
+            s = int(cfg.get("smooth_shake_strength", 20))
+            xexpr = f"{s}+{s}*0.90*sin(2*PI*t/8.0)"
+            yexpr = f"{s}-{s}*0.35*cos(2*PI*t/4.0)"
+            # SUPERSAMPLING chống GIẬT: crop chỉ dịch nguyên pixel -> lắc chậm nhảy
+            # 0,1,0,1 px. Phóng lên Fx (bilinear) rồi crop-pan, thu nhỏ về res (bicubic)
+            # -> vị trí lẻ pixel được nội suy mượt. Fx do UI "Độ mượt": Thường=2, Cao=3.
+            F = max(1, int(cfg.get("shake_supersample", 2)))
+            steps.append(f"scale=iw*{F}:ih*{F}:flags=bilinear")
+            steps.append(
+                f"crop=in_w-{s*2*F}:in_h-{s*2*F}:x='({xexpr})*{F}':y='({yexpr})*{F}'")
+            steps.append(f"scale={res}:flags=bicubic")
+        filter_parts.append(",".join(steps) + "[bg]")
+        last_label = "[bg]"
 
     # Các lớp overlay dạng "sáng trên nền đen" (tuyết, sóng âm) đều chồng bằng blend
     # 'screen'. QUAN TRỌNG: phải chạy trong RGB (gbrp) — nếu để YUV, phép screen tác
     # động lên 2 kênh chroma Cb/Cr (trung tính 128) đẩy lên ~192 -> ám HỒNG/tím toàn
     # khung. Convert nền + overlay sang gbrp thì nền đen mới thực sự "biến mất".
-    snow_idx, wave_idx = overlay_indices(cfg)
     overlays = []
-    if snow_idx is not None:
-        overlays.append((snow_idx, cfg.get("snow_opacity", 0.6)))
-    if wave_idx is not None:
-        overlays.append((wave_idx, cfg.get("wave_opacity", 0.9)))
+    if idx["snow"] is not None:
+        overlays.append((idx["snow"], cfg.get("snow_opacity", 0.6)))
+    if idx["wave"] is not None:
+        overlays.append((idx["wave"], cfg.get("wave_opacity", 0.9)))
 
     if overlays:
         filter_parts.append(f"{last_label}format=gbrp[bgrgb]")
         last_label = "[bgrgb]"
-        for i, (idx, opacity) in enumerate(overlays):
-            filter_parts.append(f"[{idx}:v]scale={res},format=gbrp[ov{i}s]")
+        for i, (oidx, opacity) in enumerate(overlays):
+            filter_parts.append(f"[{oidx}:v]scale={res},format=gbrp[ov{i}s]")
             out = f"[ov{i}]"
             filter_parts.append(
                 f"{last_label}[ov{i}s]blend=all_mode=screen:"
@@ -359,6 +486,8 @@ def prepare_command(folder, cfg):
     sub = find_file(folder, SUB_EXT)
     snow = cfg.get("snow_video_path") or ""
     wave = cfg.get("wave_video_path") or ""
+    scenery_on = bool(cfg["effects"].get("scenery_bg"))
+    scenery_files = list_scenery(cfg.get("scenery_dir", "")) if scenery_on else []
     out = os.path.join(folder, cfg["output_name"])
 
     missing = [name for name, f in
@@ -367,10 +496,14 @@ def prepare_command(folder, cfg):
         missing.append("snow.mp4")
     if cfg["effects"].get("sound_wave") and not (wave and os.path.exists(wave)):
         missing.append("file sóng âm")
+    if scenery_on and not scenery_files:
+        missing.append("video phong cảnh")
     if missing:
         return {"ok": False, "cmd": None, "output": out,
                 "missing": f"Thiếu {', '.join(missing)}", "duration": None,
-                "temp_sub": None}
+                "temp_sub": None, "temp_list": None}
+
+    duration = probe_duration(audio)
 
     # Copy .srt sang FILE TẠM có đường dẫn ASCII an toàn rồi mới đưa vào filter
     # 'subtitles='. Lý do: filter này bao đường dẫn bằng dấu nháy đơn ', nên nếu đường
@@ -388,16 +521,30 @@ def prepare_command(folder, cfg):
     sub_escaped = escape_ffmpeg_path(sub_for_filter)
     filter_complex = build_filter_complex(cfg, sub_escaped)
 
+    idx = input_layout(cfg)
+
+    # Chế độ nền phong cảnh: chuẩn hóa (cache) + dựng playlist xáo trộn đủ độ dài voice.
+    temp_list = None
+    if scenery_on:
+        normalized = normalize_scenery(
+            scenery_files, cfg["resolution"], cfg["fps"],
+            cfg.get("encoder", "libx264"))
+        if not normalized:
+            return {"ok": False, "cmd": None, "output": out,
+                    "missing": "Không chuẩn hóa được video phong cảnh",
+                    "duration": None, "temp_sub": temp_sub, "temp_list": None}
+        temp_list = build_scenery_playlist(normalized, duration or 0)
+
     # -progress pipe:1 -nostats: xuất tiến độ máy-đọc-được ra stdout để vẽ thanh %
     cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"]
-    # Giới hạn số luồng xử lý filter -> khống chế mức ăn CPU của mỗi video.
-    # (Các hiệu ứng zoom/rung/tuyết/phụ đề chạy trên CPU; NVENC chỉ tăng tốc khâu nén.)
     ft = cfg.get("filter_threads")
     if ft:
         cmd += ["-filter_complex_threads", str(int(ft)),
                 "-filter_threads", str(int(ft))]
+    # THỨ TỰ input PHẢI khớp input_layout(): [scenery], ảnh, audio, [snow], [sóng âm].
+    if scenery_on and temp_list:
+        cmd += ["-f", "concat", "-safe", "0", "-i", temp_list]
     cmd += ["-loop", "1", "-i", img, "-i", audio]
-    # THỨ TỰ input phải khớp overlay_indices(): snow trước, sóng âm sau.
     if cfg["effects"]["snow_overlay"]:
         cmd += ["-stream_loop", "-1", "-i", snow]
     if cfg["effects"].get("sound_wave"):
@@ -405,7 +552,7 @@ def prepare_command(folder, cfg):
 
     cmd += [
         "-filter_complex", filter_complex,
-        "-map", "[vout]", "-map", "1:a",
+        "-map", "[vout]", "-map", f"{idx['audio']}:a",
         "-r", str(cfg["fps"]),
         "-shortest",
     ]
@@ -413,7 +560,7 @@ def prepare_command(folder, cfg):
     cmd += ["-c:a", "aac", "-b:a", "192k", out]
 
     return {"ok": True, "cmd": cmd, "output": out, "missing": None,
-            "duration": probe_duration(audio), "temp_sub": temp_sub}
+            "duration": duration, "temp_sub": temp_sub, "temp_list": temp_list}
 
 
 def run_command(cmd, on_proc=None, on_progress=None, duration=None):

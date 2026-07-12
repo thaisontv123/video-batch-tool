@@ -64,6 +64,9 @@ class App(tk.Tk):
         self.snow_opacity = tk.DoubleVar(value=0.6)
         self.wave_on = tk.BooleanVar(value=False)
         self.wave_opacity = tk.DoubleVar(value=0.9)
+        self.scenery_on = tk.BooleanVar(value=False)
+        self.scenery_dir = tk.StringVar()
+        self.scenery_scale = tk.IntVar(value=62)   # cỡ ảnh chính (% chiều ngang)
         self.smooth_shake_on = tk.BooleanVar(value=True)
         self.smooth_shake_strength = tk.IntVar(value=20)
         # Độ mượt lắc (supersampling): nhãn -> hệ số F
@@ -143,6 +146,7 @@ class App(tk.Tk):
         canvas.bind_all("<MouseWheel>", _wheel)
 
         self._build_folder_section(self.cfg_frame)
+        self._build_scenery_section(self.cfg_frame)
         self._build_effects_section(self.cfg_frame)
         self._build_subtitle_section(self.cfg_frame)
         self._build_output_section(self.cfg_frame)
@@ -164,6 +168,24 @@ class App(tk.Tk):
             side="left", padx=(6, 0))
         self.lbl_projects = ttk.Label(f, text="Chưa chọn thư mục.", foreground="#555")
         self.lbl_projects.pack(anchor="w", pady=(6, 0))
+
+    # --- Nền video phong cảnh ---
+    def _build_scenery_section(self, parent):
+        f = self._section(parent, "🎞️ Nền video phong cảnh")
+        ttk.Checkbutton(
+            f, text="🌊  Dùng video phong cảnh làm nền mờ (ảnh chính đè giữa)",
+            variable=self.scenery_on).pack(anchor="w", pady=2)
+        ttk.Label(f, text="Chọn 1 thư mục chứa các video phong cảnh — tool tự xáo trộn "
+                          "& lặp cho vừa đúng độ dài voice.",
+                  foreground="#777", wraplength=340, justify="left").pack(
+            anchor="w", pady=(0, 4))
+        sr = ttk.Frame(f); sr.pack(fill="x")
+        ttk.Label(sr, text="Thư mục:").pack(side="left")
+        ttk.Entry(sr, textvariable=self.scenery_dir, state="readonly").pack(
+            side="left", fill="x", expand=True, padx=6)
+        ttk.Button(sr, text="Chọn...", command=self._pick_scenery).pack(side="left")
+        self._slider(f, "Cỡ ảnh chính (%)", self.scenery_scale, 30, 100,
+                     resolution=1, is_int=True)
 
     # --- 2. Hiệu ứng ---
     def _build_effects_section(self, parent):
@@ -485,6 +507,11 @@ class App(tk.Tk):
         if f:
             self.wave_path.set(f)
 
+    def _pick_scenery(self):
+        d = filedialog.askdirectory(title="Chọn thư mục chứa các video phong cảnh")
+        if d:
+            self.scenery_dir.set(d)
+
     def _pick_color(self, var, swatch):
         rgb, hexc = colorchooser.askcolor(color=var.get(), title="Chọn màu")
         if hexc:
@@ -539,6 +566,8 @@ class App(tk.Tk):
         cfg["snow_opacity"] = round(float(self.snow_opacity.get()), 3)
         cfg["wave_video_path"] = self.wave_path.get()
         cfg["wave_opacity"] = round(float(self.wave_opacity.get()), 3)
+        cfg["scenery_dir"] = self.scenery_dir.get()
+        cfg["scenery_image_scale"] = round(int(self.scenery_scale.get()) / 100.0, 3)
         cfg["smooth_shake_strength"] = int(self.smooth_shake_strength.get())
         cfg["shake_supersample"] = self.quality_choices.get(self.smooth_quality.get(), 2)
         cfg["max_workers"] = self._effective_workers()  # 1 nếu chạy lần lượt
@@ -547,6 +576,7 @@ class App(tk.Tk):
             "snow_overlay": bool(self.snow_on.get()),
             "smooth_shake": bool(self.smooth_shake_on.get()),
             "sound_wave": bool(self.wave_on.get()),
+            "scenery_bg": bool(self.scenery_on.get()),
             "glow_subtitle": bool(self.glow_on.get()),
         }
         cfg["subtitle"] = {
@@ -579,6 +609,12 @@ class App(tk.Tk):
             messagebox.showwarning(
                 APP_TITLE,
                 "Đang bật hiệu ứng Sóng âm nhưng chưa chọn file video sóng âm hợp lệ.")
+            return False
+        if self.scenery_on.get() and not core.list_scenery(self.scenery_dir.get()):
+            messagebox.showwarning(
+                APP_TITLE,
+                "Đang bật Nền video phong cảnh nhưng thư mục chưa chọn hoặc không có "
+                "video nào (.mp4/.mov/.mkv...).")
             return False
         ok, _ = core.check_ffmpeg()
         if not ok:
@@ -667,12 +703,13 @@ class App(tk.Tk):
             finally:
                 with self.procs_lock:
                     self.active_procs.pop(folder, None)
-                ts = prep.get("temp_sub")
-                if ts and os.path.exists(ts):
-                    try:
-                        os.remove(ts)
-                    except OSError:
-                        pass
+                for key in ("temp_sub", "temp_list"):
+                    tp = prep.get(key)
+                    if tp and os.path.exists(tp):
+                        try:
+                            os.remove(tp)
+                        except OSError:
+                            pass
 
             if self.cancel_event.is_set():
                 self._emit(folder, ST_CANCEL, "Đã hủy")
