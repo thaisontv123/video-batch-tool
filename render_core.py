@@ -295,7 +295,7 @@ def normalize_scenery(files, res, fps, encoder):
             # ghi ra file tạm riêng rồi đổi tên (nguyên tử) -> an toàn khi nhiều
             # project render song song cùng chuẩn hóa 1 clip.
             tmp = f"{dst}.{os.getpid()}.{threading.get_ident()}.tmp.mp4"
-            cmd = ["ffmpeg", "-y", "-i", src, "-vf", vf, "-an"]
+            cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-i", src, "-vf", vf, "-an"]
             cmd += video_encode_args(encoder, {"crf": 23, "preset": "medium"})
             cmd += [tmp]
             r = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW)
@@ -546,7 +546,10 @@ def prepare_command(folder, cfg):
                 "-filter_threads", str(int(ft))]
     # THỨ TỰ input PHẢI khớp input_layout(): [scenery], ảnh, audio, [snow], [sóng âm].
     if scenery_on and temp_list:
-        cmd += ["-f", "concat", "-safe", "0", "-i", temp_list]
+        # -hwaccel auto: GIẢI MÃ video nền trên GPU (NVDEC/DXVA...) -> giảm tải CPU,
+        # vì decoder H.264 chạy đa luồng không bị "Luồng CPU/video" giới hạn. Máy không
+        # có GPU giải mã thì tự động về CPU (an toàn mọi máy).
+        cmd += ["-hwaccel", "auto", "-f", "concat", "-safe", "0", "-i", temp_list]
     cmd += ["-loop", "1", "-i", img, "-i", audio]
     if cfg["effects"]["snow_overlay"]:
         cmd += ["-stream_loop", "-1", "-i", snow]
