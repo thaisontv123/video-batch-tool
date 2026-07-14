@@ -77,6 +77,10 @@ thư-mục-gốc/
 - Video phong cảnh khác độ phân giải/fps đều được **chuẩn hóa 1 lần và cache lại** (thư mục
   `%TEMP%/vbt_scenery_cache`) — các project sau dùng lại ngay, không encode lại.
 - Ở chế độ này ảnh chính **đứng yên** (không áp hiệu ứng lắc). Tuyết/sóng âm vẫn chồng được lên trên.
+- **Tăng tốc GPU cho nền phong cảnh:** khi chọn encoder **NVENC (NVIDIA)**, tool tự động
+  **giải mã video nền + ghép ảnh chính trên GPU** (NVDEC + `overlay_cuda`) → giảm mạnh tải CPU
+  (chỉ còn phụ đề chạy CPU vì libass không có bản GPU). Nếu GPU lỗi, tool **tự chuyển về CPU**
+  để không hỏng render. Encoder AMD/Intel/CPU thì giải mã GPU qua `-hwaccel auto`, ghép trên CPU.
 
 ## Hiệu ứng sóng âm thanh (overlay)
 

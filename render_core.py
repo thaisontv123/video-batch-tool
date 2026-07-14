@@ -393,7 +393,16 @@ def project_status(folder, need_snow, snow_path, need_wave=False, wave_path=None
 # ---------------------------------------------------------------------------
 # Xây dựng filter_complex (GIỮ NGUYÊN logic đã test — spec mục 4)
 # ---------------------------------------------------------------------------
-def build_filter_complex(cfg, sub_path):
+def scenery_use_cuda(cfg, force_cpu=False):
+    """Có dùng pipeline GPU (overlay_cuda) cho nền phong cảnh không?
+    Điều kiện: bật nền phong cảnh + encoder NVENC (có NVIDIA) + không làm mờ nền."""
+    if force_cpu or not cfg.get("effects", {}).get("scenery_bg"):
+        return False
+    return (cfg.get("encoder") == "h264_nvenc"
+            and float(cfg.get("scenery_blur", 0) or 0) <= 0)
+
+
+def build_filter_complex(cfg, sub_path, force_cpu_scenery=False):
     res = cfg["resolution"]
     w, h = res.split(":")
     effects = cfg["effects"]
@@ -403,18 +412,28 @@ def build_filter_complex(cfg, sub_path):
     if idx["scenery_on"]:
         # CHẾ ĐỘ NỀN PHONG CẢNH: video phong cảnh phủ kín làm nền, ảnh chính đè giữa.
         # (Ảnh chính đứng yên — không áp hiệu ứng lắc ở chế độ này.)
-        # Chỉ làm mờ nếu scenery_blur > 0 (mặc định 0 = giữ nền SẮC NÉT như video gốc).
-        blur = float(cfg.get("scenery_blur", 0) or 0)
-        bg_steps = (f"[{idx['scenery']}:v]scale={res}:"
-                    f"force_original_aspect_ratio=increase,crop={res}")
-        if blur > 0:
-            bg_steps += f",gblur=sigma={blur}"
-        filter_parts.append(f"{bg_steps}[bg0]")
         img_scale = float(cfg.get("scenery_image_scale", 0.62))
         iw = max(2, (int(int(w) * img_scale)) // 2 * 2)  # chẵn cho yuv420
-        filter_parts.append(f"[{idx['image']}:v]scale={iw}:-2[fg]")
-        # đặt ảnh hơi cao hơn giữa để chừa chỗ cho phụ đề bên dưới
-        filter_parts.append("[bg0][fg]overlay=(W-w)/2:(H-h)/2-60[bg]")
+        if scenery_use_cuda(cfg, force_cpu_scenery):
+            # GPU: video nền đã chuẩn hóa đúng res + giải mã thẳng lên GPU (cuda frames);
+            # ghép ảnh chính bằng overlay_cuda (trên GPU) -> giảm mạnh tải CPU. Chỉ tải
+            # ảnh chính (nhỏ) lên GPU; sau overlay thì tải về CPU cho phụ đề (libass).
+            filter_parts.append(
+                f"[{idx['image']}:v]scale={iw}:-2,format=nv12,hwupload_cuda[fg]")
+            filter_parts.append(
+                f"[{idx['scenery']}:v][fg]overlay_cuda=(W-w)/2:(H-h)/2-60[compc]")
+            filter_parts.append("[compc]hwdownload,format=nv12[bg]")
+        else:
+            # CPU: chỉ làm mờ nếu scenery_blur > 0 (mặc định 0 = giữ nền SẮC NÉT).
+            blur = float(cfg.get("scenery_blur", 0) or 0)
+            bg_steps = (f"[{idx['scenery']}:v]scale={res}:"
+                        f"force_original_aspect_ratio=increase,crop={res}")
+            if blur > 0:
+                bg_steps += f",gblur=sigma={blur}"
+            filter_parts.append(f"{bg_steps}[bg0]")
+            filter_parts.append(f"[{idx['image']}:v]scale={iw}:-2[fg]")
+            # đặt ảnh hơi cao hơn giữa để chừa chỗ cho phụ đề bên dưới
+            filter_parts.append("[bg0][fg]overlay=(W-w)/2:(H-h)/2-60[bg]")
         last_label = "[bg]"
     else:
         steps = [f"[{idx['image']}:v]scale={res}:"
@@ -522,8 +541,6 @@ def prepare_command(folder, cfg):
         sub_for_filter = sub  # dự phòng: dùng path gốc nếu copy lỗi
 
     sub_escaped = escape_ffmpeg_path(sub_for_filter)
-    filter_complex = build_filter_complex(cfg, sub_escaped)
-
     idx = input_layout(cfg)
 
     # Chế độ nền phong cảnh: chuẩn hóa (cache) + dựng playlist xáo trộn đủ độ dài voice.
@@ -538,35 +555,48 @@ def prepare_command(folder, cfg):
                     "duration": None, "temp_sub": temp_sub, "temp_list": None}
         temp_list = build_scenery_playlist(normalized, duration or 0)
 
-    # -progress pipe:1 -nostats: xuất tiến độ máy-đọc-được ra stdout để vẽ thanh %
-    cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"]
     ft = cfg.get("filter_threads")
-    if ft:
-        cmd += ["-filter_complex_threads", str(int(ft)),
-                "-filter_threads", str(int(ft))]
-    # THỨ TỰ input PHẢI khớp input_layout(): [scenery], ảnh, audio, [snow], [sóng âm].
-    if scenery_on and temp_list:
-        # -hwaccel auto: GIẢI MÃ video nền trên GPU (NVDEC/DXVA...) -> giảm tải CPU,
-        # vì decoder H.264 chạy đa luồng không bị "Luồng CPU/video" giới hạn. Máy không
-        # có GPU giải mã thì tự động về CPU (an toàn mọi máy).
-        cmd += ["-hwaccel", "auto", "-f", "concat", "-safe", "0", "-i", temp_list]
-    cmd += ["-loop", "1", "-i", img, "-i", audio]
-    if cfg["effects"]["snow_overlay"]:
-        cmd += ["-stream_loop", "-1", "-i", snow]
-    if cfg["effects"].get("sound_wave"):
-        cmd += ["-stream_loop", "-1", "-i", wave]
 
-    cmd += [
-        "-filter_complex", filter_complex,
-        "-map", "[vout]", "-map", f"{idx['audio']}:a",
-        "-r", str(cfg["fps"]),
-        "-shortest",
-    ]
-    cmd += video_encode_args(cfg.get("encoder", "libx264"), cfg)
-    cmd += ["-c:a", "aac", "-b:a", "192k", out]
+    def assemble(filter_complex, scenery_hwaccel):
+        # scenery_hwaccel: list cờ -hwaccel đặt TRƯỚC input scenery.
+        c = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"]
+        if ft:
+            c += ["-filter_complex_threads", str(int(ft)),
+                  "-filter_threads", str(int(ft))]
+        # THỨ TỰ input PHẢI khớp input_layout(): [scenery], ảnh, audio, [snow], [sóng âm].
+        if scenery_on and temp_list:
+            c += scenery_hwaccel + ["-f", "concat", "-safe", "0", "-i", temp_list]
+        c += ["-loop", "1", "-i", img, "-i", audio]
+        if cfg["effects"]["snow_overlay"]:
+            c += ["-stream_loop", "-1", "-i", snow]
+        if cfg["effects"].get("sound_wave"):
+            c += ["-stream_loop", "-1", "-i", wave]
+        c += ["-filter_complex", filter_complex,
+              "-map", "[vout]", "-map", f"{idx['audio']}:a",
+              "-r", str(cfg["fps"]), "-shortest"]
+        c += video_encode_args(cfg.get("encoder", "libx264"), cfg)
+        c += ["-c:a", "aac", "-b:a", "192k", out]
+        return c
 
-    return {"ok": True, "cmd": cmd, "output": out, "missing": None,
-            "duration": duration, "temp_sub": temp_sub, "temp_list": temp_list}
+    use_cuda = scenery_use_cuda(cfg)
+    fallback_cmd = None
+    if use_cuda:
+        # Lệnh chính: giải mã video nền THẲNG lên GPU (cuda) + overlay_cuda ghép ảnh.
+        cmd = assemble(build_filter_complex(cfg, sub_escaped),
+                       ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+        # Lệnh DỰ PHÒNG: nếu GPU lỗi -> giải mã GPU (auto) rồi ghép ảnh trên CPU.
+        fallback_cmd = assemble(
+            build_filter_complex(cfg, sub_escaped, force_cpu_scenery=True),
+            ["-hwaccel", "auto"])
+    else:
+        # -hwaccel auto: giải mã video nền trên GPU (NVDEC/DXVA) rồi xử lý CPU. Máy
+        # không có GPU giải mã thì tự về CPU (an toàn mọi máy).
+        cmd = assemble(build_filter_complex(cfg, sub_escaped),
+                       ["-hwaccel", "auto"] if scenery_on else [])
+
+    return {"ok": True, "cmd": cmd, "fallback_cmd": fallback_cmd, "output": out,
+            "missing": None, "duration": duration,
+            "temp_sub": temp_sub, "temp_list": temp_list}
 
 
 def run_command(cmd, on_proc=None, on_progress=None, duration=None):

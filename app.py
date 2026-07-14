@@ -697,6 +697,14 @@ class App(tk.Tk):
                 code, stderr = core.run_command(
                     prep["cmd"], on_proc=on_proc,
                     on_progress=on_progress, duration=prep.get("duration"))
+                # Nếu lệnh GPU (overlay_cuda) lỗi -> tự chạy lệnh CPU dự phòng.
+                if (code != 0 and prep.get("fallback_cmd")
+                        and not self.cancel_event.is_set()):
+                    self._emit(folder, ST_RUN, "GPU lỗi, chuyển CPU...")
+                    last_pct[0] = -1
+                    code, stderr = core.run_command(
+                        prep["fallback_cmd"], on_proc=on_proc,
+                        on_progress=on_progress, duration=prep.get("duration"))
             except Exception as e:  # noqa: BLE001
                 self._emit(folder, ST_ERR, f"Lỗi: {e}", log=str(e))
                 return
