@@ -49,6 +49,7 @@ class App(tk.Tk):
         self.projects = []                 # danh sách đường dẫn thư mục con
         self.row_by_folder = {}            # folder -> item id trong Treeview
         self.row_data = {}                 # folder -> dict(name,status,progress,note)
+        self.checked = {}                  # folder -> bool (tích chọn để render)
         self.frac = {}                     # folder -> tiến độ 0..1 (cho thanh tổng)
         self.error_logs = {}               # folder -> log lỗi đầy đủ
         self.msg_queue = queue.Queue()     # hàng đợi cập nhật từ worker -> UI
@@ -395,6 +396,9 @@ class App(tk.Tk):
         self.btn_render = ttk.Button(f, text="▶ Render tất cả",
                                      command=self._on_render_all)
         self.btn_render.pack(side="left", padx=6)
+        self.btn_render_sel = ttk.Button(f, text="▶ Render đã chọn",
+                                         command=self._on_render_selected)
+        self.btn_render_sel.pack(side="left", padx=6)
         self.btn_cancel = ttk.Button(f, text="■ Dừng", command=self._on_cancel,
                                      state="disabled")
         self.btn_cancel.pack(side="left", padx=6)
@@ -404,21 +408,24 @@ class App(tk.Tk):
         f = ttk.LabelFrame(parent, text="📊 Tiến trình render", padding=8)
         f.pack(fill="both", expand=True)
 
-        cols = ("project", "status", "progress", "note")
+        cols = ("sel", "project", "status", "progress", "note")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=20)
+        self.tree.heading("sel", text="☑", command=self._toggle_all_checked)
         self.tree.heading("project", text="Project")
         self.tree.heading("status", text="Trạng thái")
         self.tree.heading("progress", text="Tiến độ")
         self.tree.heading("note", text="Ghi chú")
-        self.tree.column("project", width=170, anchor="w")
-        self.tree.column("status", width=110, anchor="center")
-        self.tree.column("progress", width=150, anchor="w")
-        self.tree.column("note", width=180, anchor="w")
+        self.tree.column("sel", width=36, anchor="center", stretch=False)
+        self.tree.column("project", width=160, anchor="w")
+        self.tree.column("status", width=105, anchor="center")
+        self.tree.column("progress", width=140, anchor="w")
+        self.tree.column("note", width=170, anchor="w")
         tsb = ttk.Scrollbar(f, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=tsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         tsb.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", self._on_row_double_click)
+        self.tree.bind("<Button-1>", self._on_tree_click)  # click cột ☑ để tích chọn
 
         bottom = ttk.Frame(parent)
         bottom.pack(fill="x", pady=(6, 0))
@@ -525,6 +532,7 @@ class App(tk.Tk):
             self.tree.delete(i)
         self.row_by_folder.clear()
         self.row_data.clear()
+        self.checked.clear()
         self.frac.clear()
         self.error_logs.clear()
 
@@ -541,10 +549,12 @@ class App(tk.Tk):
             else:
                 status, note = ST_WAIT, ""
                 ready += 1
+            self.checked[folder] = not missing   # mặc định tích những cái đủ file
             self.row_data[folder] = {"name": name, "status": status,
                                      "progress": "", "note": note}
+            sel = "☑" if self.checked[folder] else "☐"
             iid = self.tree.insert("", "end",
-                                   values=(name, status, "", note))
+                                   values=(sel, name, status, "", note))
             self.row_by_folder[folder] = iid
 
         self.lbl_projects.config(
@@ -649,6 +659,19 @@ class App(tk.Tk):
             return
         cfg = self._build_config()
         self._start_render(list(self.projects), cfg, preview=False)
+
+    def _on_render_selected(self):
+        if self.is_rendering:
+            return
+        if not self._validate_before_render():
+            return
+        chosen = [f for f in self.projects if self.checked.get(f, False)]
+        if not chosen:
+            messagebox.showwarning(
+                APP_TITLE, "Chưa tích chọn video nào. Bấm ô ☑ ở cột đầu để chọn.")
+            return
+        cfg = self._build_config()
+        self._start_render(chosen, cfg, preview=False)
 
     # ---------- điều phối render (threaded) ----------
     def _start_render(self, folders, cfg, preview=False):
@@ -820,8 +843,39 @@ class App(tk.Tk):
             d["progress"] = progress
         iid = self.row_by_folder.get(folder)
         if iid:
-            self.tree.item(iid, values=(d["name"], d["status"],
+            sel = "☑" if self.checked.get(folder, True) else "☐"
+            self.tree.item(iid, values=(sel, d["name"], d["status"],
                                         d["progress"], d["note"]))
+
+    # ---------- tích chọn video để render ----------
+    def _folder_of_iid(self, iid):
+        return next((f for f, i in self.row_by_folder.items() if i == iid), None)
+
+    def _on_tree_click(self, event):
+        # chỉ xử lý khi click vào cột "sel" (☑) và không đang render
+        if self.is_rendering:
+            return
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return
+        if self.tree.identify_column(event.x) != "#1":   # cột đầu = sel
+            return
+        iid = self.tree.identify_row(event.y)
+        folder = self._folder_of_iid(iid)
+        if folder is None:
+            return
+        self.checked[folder] = not self.checked.get(folder, True)
+        d = self.row_data.get(folder, {})
+        self._set_row(folder, d.get("status", ST_WAIT), d.get("note", ""))
+
+    def _toggle_all_checked(self):
+        if self.is_rendering or not self.projects:
+            return
+        # nếu đang có cái nào bỏ tích -> tích hết; ngược lại bỏ tích hết
+        target = not all(self.checked.get(f, False) for f in self.projects)
+        for folder in self.projects:
+            self.checked[folder] = target
+            d = self.row_data.get(folder, {})
+            self._set_row(folder, d.get("status", ST_WAIT), d.get("note", ""))
 
     # ---------- dò encoder CPU/GPU chạy nền ----------
     def _detect_encoders_async(self):
@@ -865,6 +919,7 @@ class App(tk.Tk):
         state = "disabled" if running else "normal"
         self.btn_preview.config(state=state)
         self.btn_render.config(state=state)
+        self.btn_render_sel.config(state=state)
         self.btn_cancel.config(state="normal" if running else "disabled")
 
     # ---------- misc ----------

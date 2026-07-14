@@ -46,6 +46,15 @@ thư-mục-gốc/
 - Project nào thiếu file sẽ bị **bỏ qua kèm cảnh báo**, không làm dừng cả loạt.
 - Video xuất ra tên `output.mp4` **ngay trong từng thư mục project**.
 
+## Chọn video cần render
+
+- Bảng **"Tiến trình render"** có cột **☑** ở đầu mỗi dòng. **Click vào ô ☑** để tích/bỏ tích
+  từng video (mặc định tích sẵn những project đủ file).
+- Click vào **tiêu đề cột ☑** để **tích/bỏ tích tất cả** cùng lúc.
+- Nút **"▶ Render đã chọn"**: chỉ render những video đang tích. Dùng khi cần render một
+  số lượng cụ thể thay vì cả loạt.
+- Nút **"▶ Render tất cả"**: render mọi project (bỏ qua tích chọn).
+
 ## Các bước dùng
 
 1. **Chọn thư mục gốc** → tool liệt kê số project tìm thấy, đánh dấu project sẵn sàng.
