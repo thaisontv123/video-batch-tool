@@ -649,7 +649,13 @@ def prepare_command(folder, cfg):
         # THỨ TỰ input PHẢI khớp input_layout(): [scenery], ảnh, audio, [snow], [sóng âm].
         if scenery_on and temp_list:
             c += scenery_hwaccel + ["-f", "concat", "-safe", "0", "-i", temp_list]
-        c += ["-loop", "1", "-i", img, "-i", audio]
+        if scenery_on:
+            # Nền phong cảnh: ảnh chính chỉ là lớp đè -> nạp 1 khung DUY NHẤT (không
+            # -loop), overlay tự giữ khung cuối suốt video. Dùng -loop sẽ giải mã lại
+            # PNG + scale + đẩy lên GPU ở MỌI khung -> tốn ~4.5x CPU (đã đo).
+            c += ["-i", img, "-i", audio]
+        else:
+            c += ["-loop", "1", "-i", img, "-i", audio]
         if cfg["effects"]["snow_overlay"]:
             c += ["-stream_loop", "-1", "-i", snow]
         if cfg["effects"].get("sound_wave"):
