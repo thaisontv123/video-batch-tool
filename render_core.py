@@ -471,12 +471,31 @@ def scenery_use_cuda(cfg, force_cpu=False):
             and float(cfg.get("scenery_blur", 0) or 0) <= 0)
 
 
+def _snow_layer(snow_idx, res, fps, opacity, out):
+    """Lớp tuyết dạng TRẮNG + ALPHA (alpha = độ sáng hạt tuyết × opacity), yuva420p.
+
+    Phủ màu trắng với alpha b = độ sáng/255 cho ra đúng công thức RGB screen
+    (X' = X + b·(255 − X)) cho mọi kênh, kể cả chroma -> giống hệt blend screen cũ
+    (đã đo PSNR 48 dB) nhưng KHÔNG phải đổi cả khung sang RGB (gbrp) và chạy được trên
+    GPU bằng overlay_cuda. Chỉ đúng cho tuyết trắng/xám (đúng loại file snow).
+    """
+    w, h = res.split(":")
+    # Thứ tự PHẢI là extractplanes -> scale (đặt scale trước extractplanes làm hỏng
+    # chuỗi lọc: không ra khung nào — đã test). Scale 1 kênh xám cũng nhẹ hơn.
+    return (f"[{snow_idx}:v]extractplanes=y,scale={w}:{h},"
+            f"lut=c0='clip((val-16)*255/219*{opacity},0,255)'[{out}m];"
+            f"color=c=white:s={w}x{h}:r={fps},format=yuva420p[{out}w];"
+            f"[{out}w][{out}m]alphamerge[{out}]")
+
+
 def build_filter_complex(cfg, sub_path, force_cpu_scenery=False):
     res = cfg["resolution"]
     w, h = res.split(":")
     effects = cfg["effects"]
     idx = input_layout(cfg)
     filter_parts = []
+    snow_done = False
+    snow_op = cfg.get("snow_opacity", 0.6)
 
     if idx["scenery_on"]:
         # CHẾ ĐỘ NỀN PHONG CẢNH: video phong cảnh phủ kín làm nền, ảnh chính đè giữa.
@@ -487,11 +506,27 @@ def build_filter_complex(cfg, sub_path, force_cpu_scenery=False):
             # GPU: video nền đã chuẩn hóa đúng res + giải mã thẳng lên GPU (cuda frames);
             # ghép ảnh chính bằng overlay_cuda (trên GPU) -> giảm mạnh tải CPU. Chỉ tải
             # ảnh chính (nhỏ) lên GPU; sau overlay thì tải về CPU cho phụ đề (libass).
+            gpu_snow = idx["snow"] is not None
+            if gpu_snow:
+                # overlay_cuda KHÔNG phủ được lớp alpha (yuva420p) lên nv12 -> đổi nền
+                # sang yuv420p ngay trên GPU trước.
+                filter_parts.append(f"[{idx['scenery']}:v]scale_cuda=format=yuv420p[scy]")
+                main, fmt = "[scy]", "yuv420p"
+            else:
+                main, fmt = f"[{idx['scenery']}:v]", "nv12"
             filter_parts.append(
-                f"[{idx['image']}:v]scale={iw}:-2,format=nv12,hwupload_cuda[fg]")
-            filter_parts.append(
-                f"[{idx['scenery']}:v][fg]overlay_cuda=(W-w)/2:(H-h)/2-60[compc]")
-            filter_parts.append("[compc]hwdownload,format=nv12[bg]")
+                f"[{idx['image']}:v]scale={iw}:-2,format={fmt},hwupload_cuda[fg]")
+            filter_parts.append(f"{main}[fg]overlay_cuda=(W-w)/2:(H-h)/2-60[compc]")
+            if gpu_snow:
+                # Tuyết ghép trên GPU (chỉ tạo mặt nạ alpha trên CPU).
+                filter_parts.append(
+                    _snow_layer(idx["snow"], res, cfg["fps"], snow_op, "sna"))
+                filter_parts.append("[sna]hwupload_cuda[snc]")
+                filter_parts.append("[compc][snc]overlay_cuda=0:0[compc2]")
+                filter_parts.append("[compc2]hwdownload,format=yuv420p[bg]")
+                snow_done = True
+            else:
+                filter_parts.append("[compc]hwdownload,format=nv12[bg]")
         else:
             # CPU: chỉ làm mờ nếu scenery_blur > 0 (mặc định 0 = giữ nền SẮC NÉT).
             blur = float(cfg.get("scenery_blur", 0) or 0)
@@ -526,13 +561,17 @@ def build_filter_complex(cfg, sub_path, force_cpu_scenery=False):
         filter_parts.append(",".join(steps) + "[bg]")
         last_label = "[bg]"
 
-    # Các lớp overlay dạng "sáng trên nền đen" (tuyết, sóng âm) đều chồng bằng blend
-    # 'screen'. QUAN TRỌNG: phải chạy trong RGB (gbrp) — nếu để YUV, phép screen tác
-    # động lên 2 kênh chroma Cb/Cr (trung tính 128) đẩy lên ~192 -> ám HỒNG/tím toàn
-    # khung. Convert nền + overlay sang gbrp thì nền đen mới thực sự "biến mất".
+    # Tuyết (nếu chưa ghép trên GPU): phủ trắng + alpha trên CPU, ngay trong yuv420p
+    # (nhẹ hơn ~55% so với đổi cả khung sang RGB để blend screen).
+    if idx["snow"] is not None and not snow_done:
+        filter_parts.append(_snow_layer(idx["snow"], res, cfg["fps"], snow_op, "sna"))
+        filter_parts.append(f"{last_label}[sna]overlay=0:0:format=yuv420[bgs]")
+        last_label = "[bgs]"
+
+    # Sóng âm (có MÀU) vẫn chồng bằng blend 'screen'. QUAN TRỌNG: phải chạy trong RGB
+    # (gbrp) — nếu để YUV, phép screen tác động lên 2 kênh chroma Cb/Cr (trung tính 128)
+    # đẩy lên ~192 -> ám HỒNG/tím toàn khung. Convert sang gbrp thì nền đen mới "biến mất".
     overlays = []
-    if idx["snow"] is not None:
-        overlays.append((idx["snow"], cfg.get("snow_opacity", 0.6)))
     if idx["wave"] is not None:
         overlays.append((idx["wave"], cfg.get("wave_opacity", 0.9)))
 
@@ -657,7 +696,8 @@ def prepare_command(folder, cfg):
         else:
             c += ["-loop", "1", "-i", img, "-i", audio]
         if cfg["effects"]["snow_overlay"]:
-            c += ["-stream_loop", "-1", "-i", snow]
+            # giải mã file tuyết trên GPU (auto: không có GPU thì tự về CPU)
+            c += ["-hwaccel", "auto", "-stream_loop", "-1", "-i", snow]
         if cfg["effects"].get("sound_wave"):
             c += ["-stream_loop", "-1", "-i", wave]
         c += ["-filter_complex", filter_complex,

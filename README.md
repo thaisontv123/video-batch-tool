@@ -175,8 +175,11 @@ thư-mục-gốc/
 - Scale lại sau bước camera-shake `crop` để tránh lỗi `Failed to configure output pad`.
 - `-pix_fmt yuv420p` để phát được trên iPhone/QuickTime.
 - Snow dùng `-stream_loop -1` + `-shortest`: tự lặp khớp đúng độ dài audio.
-- **Blend tuyết chạy trong RGB (`format=gbrp`)**, KHÔNG để mặc định YUV. Nếu blend
-  `screen` trên YUV, hai kênh chroma bị đẩy lệch → **ám hồng/tím toàn khung hình**.
-  Chuyển sang RGB thì nền đen của snow.mp4 mới thực sự biến mất và màu gốc được giữ nguyên.
+- **Tuyết = phủ màu TRẮNG với độ trong suốt = độ sáng hạt tuyết × opacity.** Về toán học
+  giống hệt blend `screen` trong RGB (đã đo PSNR 48 dB) nhưng không phải đổi cả khung sang
+  RGB → nhẹ hơn nhiều, và ghép được trên GPU (`overlay_cuda`) khi dùng NVENC + nền phong cảnh.
+  Đo 30s video nền phong cảnh: CPU 32,6s → 9,5s. Chỉ đúng cho file tuyết trắng/xám trên nền đen.
+- Sóng âm (có màu) vẫn blend `screen` trong RGB (`format=gbrp`) — KHÔNG để YUV, nếu không
+  hai kênh chroma bị đẩy lệch → **ám hồng/tím toàn khung hình**.
 - Màu chữ: color picker trả hex `#RRGGBB` → tự convert sang ASS `&HAABBGGRR` (đảo BGR).
 - Dùng `subprocess` (không `os.system`) để bắt stderr ffmpeg và hiển thị log lên UI.
