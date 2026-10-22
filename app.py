@@ -698,6 +698,8 @@ class App(tk.Tk):
             if self.cancel_event.is_set():
                 self._emit(folder, ST_CANCEL, "Đã hủy trước khi bắt đầu")
                 return
+            if cfg["effects"].get("scenery_bg"):
+                self._emit(folder, ST_RUN, "Đang chuẩn bị video nền...")
             prep = core.prepare_command(folder, cfg)
             if not prep["ok"]:
                 self._emit(folder, ST_SKIP, prep["missing"])

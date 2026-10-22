@@ -14,6 +14,8 @@ Module này KHÔNG phụ thuộc GUI để có thể test/độc lập.
 import os
 import re
 import glob
+import json
+import time
 import shutil
 import random
 import hashlib
@@ -263,6 +265,16 @@ def list_scenery(folder):
 def _scenery_cache_dir():
     d = os.path.join(tempfile.gettempdir(), "vbt_scenery_cache")
     os.makedirs(d, exist_ok=True)
+    # dọn file .tmp dở dang từ những lần chạy bị dừng giữa chừng (cũ hơn 1 giờ)
+    now = time.time()
+    for f in os.listdir(d):
+        if f.endswith(".tmp.mp4"):
+            p = os.path.join(d, f)
+            try:
+                if now - os.path.getmtime(p) > 3600:
+                    os.remove(p)
+            except OSError:
+                pass
     return d
 
 
@@ -270,16 +282,101 @@ def _scenery_cache_dir():
 # cho mỗi project khi render hàng loạt.
 _scenery_dur_cache = {}
 
+# Cache thông tin video nguồn: (path, mtime, size) -> dict(duration, codec, w, h, fps, pix_fmt)
+_probe_cache = {}
+
+
+def probe_video_info(path):
+    """Đọc thông số luồng video (codec/kích thước/fps/pix_fmt) + độ dài. Có cache."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    if key in _probe_cache:
+        return _probe_cache[key]
+    exe = shutil.which("ffprobe") or "ffprobe"
+    try:
+        r = subprocess.run(
+            [exe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,width,height,r_frame_rate,pix_fmt",
+             "-show_entries", "format=duration", "-of", "json", path],
+            capture_output=True, text=True, creationflags=_NO_WINDOW, timeout=30)
+        data = json.loads(r.stdout or "{}")
+        s = (data.get("streams") or [{}])[0]
+        info = {
+            "duration": float(data.get("format", {}).get("duration") or 0),
+            "codec": s.get("codec_name"), "w": s.get("width"), "h": s.get("height"),
+            "fps": s.get("r_frame_rate"), "pix_fmt": s.get("pix_fmt"),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+    if not info["duration"] or not info["w"]:
+        return None
+    _probe_cache[key] = info
+    return info
+
+
+def pick_scenery_sources(files, duration, seed=None, margin=3.0):
+    """Xáo trộn rồi chọn clip nguồn cho tổng độ dài >= duration (+ dư 1 chút).
+
+    Đọc thông tin LƯỜI: chỉ ffprobe đúng những clip được chọn — thư mục 97 clip x 20
+    phút mà voice 34 phút thì chỉ đọc 2 clip. Hết clip mà chưa đủ thì xáo lại & lặp.
+    Trả về list [(path, info)].
+    """
+    rnd = random.Random(seed)
+    order = files[:]
+    rnd.shuffle(order)
+    target = (duration or 0) + margin
+    usable, seq, total, i = [], [], 0.0, 0
+    while total < target and len(seq) < 20000:
+        if i < len(order):
+            p = order[i]
+            i += 1
+            info = probe_video_info(p)
+            if not info:
+                continue
+            usable.append((p, info))
+            seq.append((p, info))
+            total += info["duration"]
+        else:
+            if not usable:
+                break
+            again = usable[:]
+            rnd.shuffle(again)
+            for item in again:
+                seq.append(item)
+                total += item[1]["duration"]
+                if total >= target:
+                    break
+    return seq
+
+
+def scenery_sources_compatible(seq):
+    """Các clip có cùng codec/kích thước/fps/pix_fmt -> concat thẳng, KHÔNG cần encode lại."""
+    keys = {(i["codec"], i["w"], i["h"], i["fps"], i["pix_fmt"]) for _, i in seq}
+    return len(keys) == 1
+
+
+def write_concat_list(paths):
+    """Ghi file list cho concat demuxer, trả về đường dẫn (file tạm)."""
+    fd, lst = tempfile.mkstemp(suffix=".txt", prefix="vbt_scenery_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        for p in paths:
+            safe = p.replace("\\", "/").replace("'", "'\\''")
+            f.write(f"file '{safe}'\n")
+    return lst
+
 
 def normalize_scenery(files, res, fps, encoder):
     """Chuẩn hóa các video phong cảnh về cùng độ phân giải/fps/codec (để concat mượt).
 
-    Kết quả được CACHE theo (đường dẫn + mtime + size + res + fps) nên chỉ encode 1 lần,
-    các project sau dùng lại ngay -> không encode lại 10 clip mỗi lần render.
-    Trả về list [(path_chuẩn_hóa, duration_giây)].
+    Chỉ dùng khi các clip ĐƯỢC CHỌN lệch thông số nhau. Kết quả CACHE theo (đường dẫn
+    + mtime + size + res + fps) nên chỉ encode 1 lần.
+    Trả về dict {src: (path_chuẩn_hóa, duration_giây)}.
     """
     cache = _scenery_cache_dir()
-    out = []
+    out = {}
     for src in files:
         try:
             st = os.stat(src)
@@ -317,36 +414,8 @@ def normalize_scenery(files, res, fps, encoder):
             if d:
                 _scenery_dur_cache[dst] = d
         if d:
-            out.append((dst, d))
+            out[src] = (dst, d)
     return out
-
-
-def build_scenery_playlist(normalized, duration, seed=None):
-    """Xáo trộn + lặp các clip đã chuẩn hóa cho tổng độ dài >= duration.
-
-    Trả về đường dẫn file list.txt (dùng cho concat demuxer), hoặc None nếu rỗng.
-    """
-    if not normalized or not duration or duration <= 0:
-        return None
-    rnd = random.Random(seed)
-    seq = []
-    total = 0.0
-    pool = []
-    # trần an toàn để không lặp vô hạn nếu duration quá lớn / clip quá ngắn
-    max_items = 20000
-    while total < duration and len(seq) < max_items:
-        if not pool:
-            pool = normalized[:]
-            rnd.shuffle(pool)
-        path, dur = pool.pop()
-        seq.append(path)
-        total += dur
-    fd, lst = tempfile.mkstemp(suffix=".txt", prefix="vbt_scenery_")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        for p in seq:
-            safe = p.replace("\\", "/").replace("'", "'\\''")
-            f.write(f"file '{safe}'\n")
-    return lst
 
 
 def input_layout(cfg):
@@ -543,17 +612,31 @@ def prepare_command(folder, cfg):
     sub_escaped = escape_ffmpeg_path(sub_for_filter)
     idx = input_layout(cfg)
 
-    # Chế độ nền phong cảnh: chuẩn hóa (cache) + dựng playlist xáo trộn đủ độ dài voice.
+    # Chế độ nền phong cảnh: xáo trộn + chọn đủ clip cho độ dài voice (chỉ đọc clip được
+    # chọn). Clip cùng thông số -> ghép thẳng, KHÔNG encode lại; lệch -> chuẩn hóa riêng
+    # những clip được chọn.
     temp_list = None
+    scenery_res_ok = True   # video nền đúng độ phân giải output -> dùng được GPU overlay
     if scenery_on:
-        normalized = normalize_scenery(
-            scenery_files, cfg["resolution"], cfg["fps"],
-            cfg.get("encoder", "libx264"))
-        if not normalized:
+        seq = pick_scenery_sources(scenery_files, duration or 0)
+        if not seq:
             return {"ok": False, "cmd": None, "output": out,
-                    "missing": "Không chuẩn hóa được video phong cảnh",
+                    "missing": "Không đọc được video phong cảnh nào",
                     "duration": None, "temp_sub": temp_sub, "temp_list": None}
-        temp_list = build_scenery_playlist(normalized, duration or 0)
+        if scenery_sources_compatible(seq):
+            w0, h0 = seq[0][1]["w"], seq[0][1]["h"]
+            scenery_res_ok = f"{w0}:{h0}" == cfg["resolution"]
+            temp_list = write_concat_list([p for p, _ in seq])
+        else:
+            uniq = list(dict.fromkeys(p for p, _ in seq))
+            norm = normalize_scenery(uniq, cfg["resolution"], cfg["fps"],
+                                     cfg.get("encoder", "libx264"))
+            paths = [norm[p][0] for p, _ in seq if p in norm]
+            if not paths:
+                return {"ok": False, "cmd": None, "output": out,
+                        "missing": "Không chuẩn hóa được video phong cảnh",
+                        "duration": None, "temp_sub": temp_sub, "temp_list": None}
+            temp_list = write_concat_list(paths)
 
     ft = cfg.get("filter_threads")
 
@@ -578,7 +661,8 @@ def prepare_command(folder, cfg):
         c += ["-c:a", "aac", "-b:a", "192k", out]
         return c
 
-    use_cuda = scenery_use_cuda(cfg)
+    # GPU overlay cần video nền đúng độ phân giải output (pipeline GPU không scale nền).
+    use_cuda = scenery_use_cuda(cfg) and scenery_res_ok
     fallback_cmd = None
     if use_cuda:
         # Lệnh chính: giải mã video nền THẲNG lên GPU (cuda) + overlay_cuda ghép ảnh.
@@ -591,7 +675,7 @@ def prepare_command(folder, cfg):
     else:
         # -hwaccel auto: giải mã video nền trên GPU (NVDEC/DXVA) rồi xử lý CPU. Máy
         # không có GPU giải mã thì tự về CPU (an toàn mọi máy).
-        cmd = assemble(build_filter_complex(cfg, sub_escaped),
+        cmd = assemble(build_filter_complex(cfg, sub_escaped, force_cpu_scenery=True),
                        ["-hwaccel", "auto"] if scenery_on else [])
 
     return {"ok": True, "cmd": cmd, "fallback_cmd": fallback_cmd, "output": out,
