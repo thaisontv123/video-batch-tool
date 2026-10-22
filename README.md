@@ -119,6 +119,11 @@ thư-mục-gốc/
 - Slider **"Độ rộng lắc (px)"** chỉnh biên độ trôi (mặc định 20). Biên độ luôn nhỏ hơn lề crop
   nên **không lộ mép đen**; sau crop tự scale lại đúng resolution.
 
+## Bật/tắt phụ đề
+
+- Ô **"💬 Bật phụ đề"** ở đầu panel Phụ đề. Tắt đi thì video **không có chữ**, và project
+  **không cần file .srt** (danh sách project tự quét lại khi bật/tắt).
+
 ## Vị trí phụ đề
 
 - Ô **"Vị trí (lề dưới)"** trong panel Phụ đề: số **nhỏ = sát đáy**, **lớn = nhấc cao hơn**.

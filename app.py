@@ -83,6 +83,7 @@ class App(tk.Tk):
         self.outline_width = tk.IntVar(value=2)
         self.bold_on = tk.BooleanVar(value=False)
         self.sub_margin_v = tk.IntVar(value=10)   # lề dọc phụ đề (thang ASS ~288)
+        self.subtitle_on = tk.BooleanVar(value=True)  # bật/tắt phụ đề
 
         # --- output vars ---
         self.resolution = tk.StringVar(value="1080p")
@@ -239,6 +240,10 @@ class App(tk.Tk):
     # --- 3. Phụ đề ---
     def _build_subtitle_section(self, parent):
         f = self._section(parent, "🔤 Phụ đề (Subtitle)")
+
+        ttk.Checkbutton(f, text="💬  Bật phụ đề (tắt = video không có chữ, không cần file .srt)",
+                        variable=self.subtitle_on,
+                        command=self._on_subtitle_toggle).pack(anchor="w", pady=(0, 4))
 
         r1 = ttk.Frame(f); r1.pack(fill="x", pady=3)
         ttk.Label(r1, text="Font chữ:", width=14).pack(side="left")
@@ -514,6 +519,11 @@ class App(tk.Tk):
         if f:
             self.wave_path.set(f)
 
+    def _on_subtitle_toggle(self):
+        # Bật/tắt phụ đề đổi điều kiện "đủ file" (.srt) -> quét lại danh sách project.
+        if self.root_dir.get() and not self.is_rendering:
+            self._scan_projects()
+
     def _pick_scenery(self):
         d = filedialog.askdirectory(title="Chọn thư mục chứa các video phong cảnh")
         if d:
@@ -543,7 +553,8 @@ class App(tk.Tk):
         ready = 0
         for folder in self.projects:
             name = os.path.basename(folder)
-            missing = core.project_status(folder, need_snow, snow, need_wave, wave)
+            missing = core.project_status(folder, need_snow, snow, need_wave, wave,
+                                          need_sub=self.subtitle_on.get())
             if missing:
                 status, note = ST_SKIP, f"Thiếu {', '.join(missing)}"
             else:
@@ -589,6 +600,7 @@ class App(tk.Tk):
             "scenery_bg": bool(self.scenery_on.get()),
             "glow_subtitle": bool(self.glow_on.get()),
         }
+        cfg["subtitle_on"] = bool(self.subtitle_on.get())
         cfg["subtitle"] = {
             "font_name": self.font_name.get(),
             "font_size": int(self.font_size.get()),
@@ -644,7 +656,8 @@ class App(tk.Tk):
             if not core.project_status(folder, cfg["effects"]["snow_overlay"],
                                        cfg["snow_video_path"],
                                        cfg["effects"]["sound_wave"],
-                                       cfg["wave_video_path"]):
+                                       cfg["wave_video_path"],
+                                       need_sub=cfg["subtitle_on"]):
                 target = folder
                 break
         if not target:

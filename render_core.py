@@ -77,6 +77,7 @@ def default_config():
         "wave_opacity": 0.9,
         "smooth_shake_strength": 20,   # biên độ lắc ngang (px), càng lớn càng trôi rộng
         "shake_supersample": 2,        # độ mượt lắc: 2=Thường(nhanh), 3=Cao(mượt hơn)
+        "subtitle_on": True,     # bật/tắt phụ đề (tắt thì không cần file .srt)
         "subtitle": {
             "font_name": "Arial",
             "font_size": 22,
@@ -445,11 +446,13 @@ def input_layout(cfg):
     return idx
 
 
-def project_status(folder, need_snow, snow_path, need_wave=False, wave_path=None):
-    """Trả về danh sách file còn thiếu của 1 project (rỗng = đủ điều kiện render)."""
+def project_status(folder, need_snow, snow_path, need_wave=False, wave_path=None,
+                   need_sub=True):
+    """Trả về danh sách file còn thiếu của 1 project (rỗng = đủ điều kiện render).
+    need_sub=False (tắt phụ đề) thì không bắt buộc có file .srt."""
     img = find_file(folder, IMG_EXT)
     audio = find_file(folder, AUDIO_EXT)
-    sub = find_file(folder, SUB_EXT)
+    sub = find_file(folder, SUB_EXT) if need_sub else ""
     missing = [name for name, f in
                [("ảnh", img), ("audio", audio), ("phụ đề .srt", sub)] if f is None]
     if need_snow and not (snow_path and os.path.exists(snow_path)):
@@ -586,6 +589,11 @@ def build_filter_complex(cfg, sub_path, force_cpu_scenery=False):
                 f"all_opacity={opacity}{out}")
             last_label = out
 
+    if not cfg.get("subtitle_on", True) or not sub_path:
+        # Tắt phụ đề: chỉ chuyển tiếp khung hình ra [vout].
+        filter_parts.append(f"{last_label}null[vout]")
+        return ";".join(filter_parts)
+
     sub = cfg["subtitle"]
     style = (
         f"FontName={sub['font_name']},FontSize={sub['font_size']},"
@@ -611,9 +619,10 @@ def prepare_command(folder, cfg):
     - Nếu thiếu file: ok=False, missing="thiếu ..." (KHÔNG raise, để batch không dừng).
     - duration = độ dài audio (giây) để tính % tiến độ khi render.
     """
+    sub_on = cfg.get("subtitle_on", True)
     img = find_file(folder, IMG_EXT)
     audio = find_file(folder, AUDIO_EXT)
-    sub = find_file(folder, SUB_EXT)
+    sub = find_file(folder, SUB_EXT) if sub_on else ""   # tắt phụ đề -> không cần .srt
     snow = cfg.get("snow_video_path") or ""
     wave = cfg.get("wave_video_path") or ""
     scenery_on = bool(cfg["effects"].get("scenery_bg"))
@@ -640,15 +649,16 @@ def prepare_command(folder, cfg):
     # dẫn gốc chứa dấu ' (vd tên "'I'll Be...'") sẽ vỡ lệnh ("No option name...").
     # Dùng file tạm né hoàn toàn mọi ký tự đặc biệt/nháy/tiếng Việt trong path.
     temp_sub = None
-    try:
-        fd, temp_sub = tempfile.mkstemp(suffix=".srt", prefix="vbt_")
-        os.close(fd)
-        shutil.copyfile(sub, temp_sub)
-        sub_for_filter = temp_sub
-    except Exception:  # noqa: BLE001
-        sub_for_filter = sub  # dự phòng: dùng path gốc nếu copy lỗi
-
-    sub_escaped = escape_ffmpeg_path(sub_for_filter)
+    sub_escaped = None
+    if sub_on:
+        try:
+            fd, temp_sub = tempfile.mkstemp(suffix=".srt", prefix="vbt_")
+            os.close(fd)
+            shutil.copyfile(sub, temp_sub)
+            sub_for_filter = temp_sub
+        except Exception:  # noqa: BLE001
+            sub_for_filter = sub  # dự phòng: dùng path gốc nếu copy lỗi
+        sub_escaped = escape_ffmpeg_path(sub_for_filter)
     idx = input_layout(cfg)
 
     # Chế độ nền phong cảnh: xáo trộn + chọn đủ clip cho độ dài voice (chỉ đọc clip được
