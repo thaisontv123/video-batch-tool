@@ -238,15 +238,36 @@ def probe_duration(path):
         return None
 
 
+def _natural_key(name):
+    """Khóa sắp xếp kiểu tự nhiên (dự phòng khi không có hàm của Windows)."""
+    return [(0, int(t)) if t.isdigit() else (1, t.casefold())
+            for t in re.split(r"(\d+)", name)]
+
+
+def sort_like_explorer(names):
+    """Sắp xếp tên GIỐNG File Explorer của Windows (sắp theo Tên).
+
+    Dùng đúng hàm StrCmpLogicalW mà Explorer dùng: không phân biệt hoa/thường, số
+    so theo giá trị (2 < 10), dấu câu như “ ” ‘ xếp trước chữ. sorted() thường so
+    theo mã ký tự nên đẩy các tên bắt đầu bằng “ xuống cuối -> lệch thứ tự Explorer.
+    """
+    try:
+        import ctypes
+        import functools
+        cmp = ctypes.windll.shlwapi.StrCmpLogicalW
+        cmp.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+        cmp.restype = ctypes.c_int
+        return sorted(names, key=functools.cmp_to_key(cmp))
+    except Exception:  # noqa: BLE001  (không phải Windows)
+        return sorted(names, key=_natural_key)
+
+
 def find_projects(root):
-    """Danh sách thư mục con (mỗi cái = 1 project), sắp xếp theo tên."""
+    """Danh sách thư mục con (mỗi cái = 1 project), cùng thứ tự với File Explorer."""
     if not root or not os.path.isdir(root):
         return []
-    return [
-        os.path.join(root, f)
-        for f in sorted(os.listdir(root))
-        if os.path.isdir(os.path.join(root, f))
-    ]
+    names = [f for f in os.listdir(root) if os.path.isdir(os.path.join(root, f))]
+    return [os.path.join(root, f) for f in sort_like_explorer(names)]
 
 
 SCENERY_EXT = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
